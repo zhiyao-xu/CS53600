@@ -23,7 +23,6 @@ import logging
 import random
 import select
 import socket
-import string
 import struct
 import time
 
@@ -39,6 +38,7 @@ TEST_END         = 4
 EXCHANGE_RESULTS = 13
 DISPLAY_RESULTS  = 14
 IPERF_DONE       = 16
+SERVER_TERMINATE = 11
 ACCESS_DENIED    = 0xFF
 SERVER_ERROR     = 0xFE
 
@@ -163,9 +163,12 @@ class Iperf3Client:
     # ------------------------------------------------------------------
 
     def _make_cookie(self):
-        """Generate a 37-byte alphanumeric cookie (iperf3 session identifier)."""
-        chars = string.ascii_lowercase + string.digits
-        return ''.join(random.choices(chars, k=37)).encode('ascii')
+        """Generate a 37-byte cookie matching iperf3's make_cookie().
+        Official charset: abcdefghijklmnopqrstuvwxyz234567 (base-32).
+        Format: 36 printable chars + null terminator = 37 bytes total.
+        """
+        chars = 'abcdefghijklmnopqrstuvwxyz234567'
+        return (''.join(random.choices(chars, k=36)) + '\x00').encode('ascii')
 
     # ------------------------------------------------------------------
     # Low-level socket I/O helpers
@@ -289,15 +292,14 @@ class Iperf3Client:
             if state != PARAM_EXCHANGE:
                 raise Iperf3Error(f"Expected PARAM_EXCHANGE ({PARAM_EXCHANGE}), got {state}")
 
-            # Step 4: Send test parameters
+            # Step 4: Send test parameters (field names match iperf3 source send_parameters())
             params = {
-                'tcp':         True,
-                'udp':         False,
-                'time':        self.duration,
-                'num_streams': 1,
-                'blocksize':   self.SEND_BUF_SIZE,
-                'omit':        0,
-                'interval':    int(self.interval),
+                'tcp':            True,
+                'time':           self.duration,
+                'parallel':       1,
+                'len':            self.SEND_BUF_SIZE,
+                'omit':           0,
+                'client_version': '3.17',
             }
             self._send_json(ctrl, params)
             logger.debug("Sent params: %s", params)
@@ -381,7 +383,7 @@ class Iperf3Client:
             # Check for server termination signal (non-blocking)
             try:
                 state = self._recv_state(ctrl)
-                if state in (SERVER_TERMINATE, ACCESS_DENIED, SERVER_ERROR):
+                if state in (TEST_END, SERVER_TERMINATE, ACCESS_DENIED, SERVER_ERROR):
                     logger.warning("Server sent terminate signal: %d", state)
                     break
             except (socket.timeout, BlockingIOError):

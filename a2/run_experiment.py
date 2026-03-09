@@ -29,13 +29,11 @@ import csv
 import logging
 import os
 import random
-import re
 import sys
 import time
 from pathlib import Path
 
 import requests
-from bs4 import BeautifulSoup
 
 from client import Iperf3Client, Iperf3Error, AccessDeniedError
 
@@ -52,7 +50,7 @@ CSV_COLUMNS = [
     'bytes_acked', 'total_retrans',
 ]
 
-IPERF3_SERVER_LIST_URL = 'https://iperf3serverlist.net/'
+IPERF3_SERVER_LIST_URL = 'https://export.iperf3serverlist.net/listed_iperf3_servers.json'
 
 
 # ---------------------------------------------------------------------------
@@ -61,73 +59,49 @@ IPERF3_SERVER_LIST_URL = 'https://iperf3serverlist.net/'
 
 def fetch_server_list(save_path=None):
     """
-    Scrape https://iperf3serverlist.net/ for public iperf3 servers.
-    Returns a list of (host, port) tuples.
+    Fetch public iperf3 servers from the JSON API at export.iperf3serverlist.net.
+    Returns a list of (host, port) tuples (TCP-capable servers only).
     Saves to save_path if provided.
     """
     logger.info("Fetching server list from %s", IPERF3_SERVER_LIST_URL)
     try:
         resp = requests.get(IPERF3_SERVER_LIST_URL, timeout=15)
         resp.raise_for_status()
+        entries = resp.json()
     except Exception as exc:
         logger.error("Failed to fetch server list: %s", exc)
         return []
 
-    soup = BeautifulSoup(resp.text, 'lxml')
     servers = []
-
-    # Parse all table rows looking for hostname/IP + port
-    for row in soup.find_all('tr'):
-        cells = [td.get_text(strip=True) for td in row.find_all('td')]
-        if len(cells) < 2:
-            continue
-
-        # Try to find a cell that looks like a hostname or IP
-        host = None
-        port = 5201
-        for cell in cells:
-            # Match IP address
-            if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', cell):
-                host = cell
-                break
-            # Match hostname (contains dots, letters)
-            if re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$', cell):
-                host = cell
-                break
-
+    for entry in entries:
+        host = entry.get('IP/HOST', '').strip()
         if not host:
             continue
 
-        # Look for a port number in the remaining cells
-        for cell in cells:
-            m = re.match(r'^(\d{4,5})$', cell)
-            if m:
-                candidate = int(m.group(1))
-                if 1024 <= candidate <= 65535:
-                    port = candidate
-                    break
+        # Skip UDP-only servers (OPTIONS contains -u but not plain TCP)
+        options = entry.get('OPTIONS', '')
+        if '-u' in options and '-R' not in options and options.strip() == '-u':
+            continue
+
+        # PORT may be a single value ("5201") or a range ("9201-9240"); take the first
+        port_str = entry.get('PORT', '5201').strip()
+        try:
+            port = int(port_str.split('-')[0])
+        except ValueError:
+            port = 5201
 
         servers.append((host, port))
 
-    # Deduplicate while preserving order
-    seen = set()
-    unique = []
-    for s in servers:
-        key = (s[0].lower(), s[1])
-        if key not in seen:
-            seen.add(key)
-            unique.append(s)
+    logger.info("Found %d servers", len(servers))
 
-    logger.info("Found %d unique servers", len(unique))
-
-    if save_path and unique:
+    if save_path and servers:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         with open(save_path, 'w') as f:
-            for host, port in unique:
+            for host, port in servers:
                 f.write(f"{host}:{port}\n")
         logger.info("Saved server list to %s", save_path)
 
-    return unique
+    return servers
 
 
 def load_server_list(path):
