@@ -151,8 +151,8 @@ def train_model(X, y, eta, seed=42):
     """
     Train a GradientBoostingRegressor to predict Δcwnd.
 
-    Uses η (clipped to ≥0) as sample weights so the model is guided
-    by the assignment objective function.
+    Uses η as sample weights via the shift η - η_min + ε, so every sample
+    contributes (none are zeroed out) while good decisions receive higher weight.
 
     Returns: (model, scaler, train_mse, test_mse, split_idx)
     """
@@ -161,11 +161,11 @@ def train_model(X, y, eta, seed=42):
 
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
-    w_train = np.maximum(0, eta[:split])
 
-    # Normalize: if all weights are zero (unlikely) fall back to uniform
-    if w_train.sum() == 0:
-        w_train = np.ones(len(X_train))
+    # Shift so all weights are strictly positive: preserves relative ordering
+    # while ensuring every sample contributes to training.
+    eta_train = eta[:split]
+    w_train = eta_train - eta_train.min() + 1e-6
 
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
@@ -321,7 +321,7 @@ def run(data_dir='data', results_dir='results'):
     print("=" * 60)
     print("Extracted Congestion Window Update Algorithm (see docstring)")
     print("=" * 60)
-    _print_algorithm()
+    # _print_algorithm()
 
     return model, scaler
 
