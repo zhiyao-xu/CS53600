@@ -27,6 +27,7 @@ results_out/
 *.out
 *.toc
 *.synctex.gz
+*.pdf
 
 # VSCode / editors
 .vscode/
