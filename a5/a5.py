@@ -37,6 +37,12 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
+def _wait(*reqs: "dist.Work | None") -> None:
+    for r in reqs:
+        if r is not None:
+            r.wait()
+
+
 # ── AllGather ──────────────────────────────────────────────────────────────────
 
 def allgather_ring(tensor, rank, world_size):
@@ -57,7 +63,7 @@ def allgather_ring(tensor, rank, world_size):
 
         req_s = dist.isend(chunks[send_idx].contiguous(), dst=send_to)
         req_r = dist.irecv(recv_buf, src=recv_from)
-        req_s.wait(); req_r.wait()
+        _wait(req_s, req_r)
         chunks[recv_idx] = recv_buf
 
     return torch.cat(chunks)
@@ -76,7 +82,7 @@ def allgather_recursive_doubling(tensor, rank, world_size):
         recv = torch.empty_like(buf)
         req_s = dist.isend(buf.contiguous(), dst=partner)
         req_r = dist.irecv(recv, src=partner)
-        req_s.wait(); req_r.wait()
+        _wait(req_s, req_r)
         # lower rank holds the lower block, so its data comes first
         buf = torch.cat([buf, recv] if rank < partner else [recv, buf])
     return buf
@@ -129,7 +135,7 @@ def allgather_swing(tensor, rank, world_size):
 
         req_s = dist.isend(send_flat, dst=send_to)
         req_r = dist.irecv(recv_flat, src=recv_from)
-        req_s.wait(); req_r.wait()
+        _wait(req_s, req_r)
 
         recv_chunks = recv_flat.view(len(peer_idx), tensor.numel())
         for idx, chunk_idx in enumerate(peer_idx):
@@ -144,8 +150,8 @@ def broadcast_binary_tree(tensor, rank, world_size, root=0):
     """
     Binary Tree Broadcast.
     Tree structure: parent of r = (r-1)//2, children = 2r+1 and 2r+2.
-    Each node blocks on recv from its parent, then isends to its children in
-    parallel. No explicit barrier needed — the recv naturally gates forwarding.
+    Each node sends to its two children sequentially (one after the other),
+    matching the book cost of 2·log(n)·(α + mβ) vs binomial's log(n)·(α + mβ).
     """
     buf = tensor.clone()
     parent   = (rank - 1) // 2 if rank > 0 else -1
@@ -154,9 +160,8 @@ def broadcast_binary_tree(tensor, rank, world_size, root=0):
     if rank != root:
         dist.recv(buf, src=parent)
 
-    reqs = [dist.isend(buf.contiguous(), dst=c) for c in children]
-    for req in reqs:
-        req.wait()
+    for c in children:
+        _wait(dist.isend(buf.contiguous(), dst=c))
     return buf
 
 
@@ -175,7 +180,7 @@ def broadcast_binomial_tree(tensor, rank, world_size, root=0):
         if rank < step_size:
             dest = rank + step_size
             if dest < world_size:
-                dist.isend(buf.contiguous(), dst=dest).wait()
+                _wait(dist.isend(buf.contiguous(), dst=dest))
         elif rank < 2 * step_size:
             dist.recv(buf, src=rank - step_size)
     return buf
@@ -196,7 +201,7 @@ BROADCAST_ALGOS = {
 N_WARMUP = 3
 N_TRIALS = 7
 
-MSG_SIZES   = [1 << k for k in range(10, 25, 2)]  # 1 KB → 16 MB (log2 steps)
+MSG_SIZES   = [1 << k for k in range(10, 27, 2)]  # 1 KB → 64 MB (log2 steps)
 FIXED_SIZE  = 1 << 20                              # 1 MB (included in MSG_SIZES)
 WORLD_SIZES = [2, 4, 8]
 
@@ -254,7 +259,7 @@ def run_benchmarks(world_size, algo_names, is_allgather, msg_sizes):
     """Spawn world_size processes, run all (algo × msg_size) combos, return {(name,size): seconds}."""
     port = _find_free_port()
     q = mp.Queue()
-    mp.spawn(
+    mp.spawn(  # type: ignore[attr-defined]
         _worker,
         args=(world_size, port, algo_names, is_allgather, msg_sizes, q),
         nprocs=world_size,

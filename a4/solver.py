@@ -5,26 +5,25 @@ Problem
 -------
 n=8 nodes, d=4 directed links in/out per node, each of capacity 1.
 Given a traffic matrix T in the hose model (T_ii=0, row/col sums ≤ d=4),
-find the d-regular directed topology and flow routing that maximize λ,
-where we route λ·T_ij flow for every commodity (i,j).
+find the d-regular directed topology and flow routing that maximize θ,
+where we route θ·T_ij flow for every commodity (i,j).
 
 MILP formulation
 ----------------
 Variables:
   x[i,j]       ∈ {0,1}  — edge i→j exists
   f[i,j,s,t]   ≥ 0      — flow of commodity (s,t) on edge (i,j)
-  λ             ≥ 0      — concurrent-flow scaling factor
+  θ             ≥ 0      — concurrent-flow scaling factor
 
-Maximize λ subject to:
+Maximize θ subject to:
   Σ_j x[i,j] = d          ∀i          (out-degree)
   Σ_i x[i,j] = d          ∀j          (in-degree)
   Σ_v f[u,v,s,t] - Σ_v f[v,u,s,t]
-    = λ·T[s,t]  if u=s
-    = -λ·T[s,t] if u=t
+    = θ·T[s,t]  if u=s
+    = -θ·T[s,t] if u=t
     = 0         otherwise              (flow conservation per commodity)
   Σ_{s,t} f[i,j,s,t] ≤ x[i,j]        ∀(i,j)  (aggregate capacity)
   f[i,j,s,t] ≤ x[i,j]                 ∀(i,j),(s,t)  (per-commodity tightening)
-  0 ≤ λ ≤ 1                           (hose model implies λ≤1)
 """
 
 import numpy as np
@@ -36,7 +35,7 @@ from gurobipy import GRB
 # Core solver
 # ---------------------------------------------------------------------------
 
-def solve(T, n=8, d=4, time_limit=600, verbose=True):
+def solve(T, n=8, d=4, time_limit=1000, verbose=True):
     """
     Solve the MILP for a given traffic matrix T.
 
@@ -50,8 +49,8 @@ def solve(T, n=8, d=4, time_limit=600, verbose=True):
     Returns
     -------
     dict with keys:
-      'lambda'   : best λ found (float)
-      'obj_bound': upper bound on optimal λ
+      'theta'    : best θ found (float)
+      'obj_bound': upper bound on optimal θ
       'gap'      : MIP gap (|bound - obj| / |obj|)
       'topology' : list of (i,j) edges in the chosen topology
       'status'   : Gurobi status code
@@ -76,12 +75,12 @@ def solve(T, n=8, d=4, time_limit=600, verbose=True):
     # ------------------------------------------------------------------
     x   = m.addVars(edges, vtype=GRB.BINARY, name="x")
     f   = m.addVars(edges, commodities, lb=0.0, name="f")
-    lam = m.addVar(lb=0.0, ub=1.0, name="lambda")
+    theta = m.addVar(lb=0.0, ub=1.0, name="theta")
 
     # ------------------------------------------------------------------
     # Objective
     # ------------------------------------------------------------------
-    m.setObjective(lam, GRB.MAXIMIZE)
+    m.setObjective(theta, GRB.MAXIMIZE)
 
     # ------------------------------------------------------------------
     # Topology: exactly d out-edges and d in-edges per node
@@ -101,9 +100,9 @@ def solve(T, n=8, d=4, time_limit=600, verbose=True):
             out_f = gp.quicksum(f[u, v, s, t] for v in nodes if v != u)
             in_f  = gp.quicksum(f[v, u, s, t] for v in nodes if v != u)
             if u == s:
-                rhs = lam * demand       # net outflow = λ·T[s,t]
+                rhs = theta * demand       # net outflow = θ·T[s,t]
             elif u == t:
-                rhs = -lam * demand      # net inflow  = λ·T[s,t]
+                rhs = -theta * demand      # net inflow  = θ·T[s,t]
             else:
                 rhs = 0.0
             m.addConstr(out_f - in_f == rhs, name=f"fc_{s}_{t}_{u}")
@@ -128,12 +127,12 @@ def solve(T, n=8, d=4, time_limit=600, verbose=True):
     m.optimize()
 
     if m.SolCount == 0:
-        return {"lambda": None, "obj_bound": m.ObjBound,
+        return {"theta": None, "obj_bound": m.ObjBound,
                 "gap": None, "topology": None, "status": m.status}
 
     topology = sorted((i, j) for i, j in edges if x[i, j].X > 0.5)
     return {
-        "lambda":    lam.X,
+        "theta":    theta.X,
         "obj_bound": m.ObjBound,
         "gap":       m.MIPGap,
         "topology":  topology,
@@ -189,11 +188,11 @@ def print_result(name, T, res):
     print(f"\n{'='*60}")
     print(f"Traffic matrix: {name}")
     print(f"  Row sums: {T.sum(axis=1).round(3)}")
-    if res["lambda"] is None:
+    if res["theta"] is None:
         print("  No feasible solution found.")
         return
-    print(f"  λ (best found) : {res['lambda']:.6f}")
-    print(f"  λ (upper bound): {res['obj_bound']:.6f}")
+    print(f"  θ (best found) : {res['theta']:.6f}")
+    print(f"  θ (upper bound): {res['obj_bound']:.6f}")
     print(f"  MIP gap        : {res['gap']:.4%}" if res["gap"] is not None else "")
     print(f"  Topology edges ({len(res['topology'])}):")
     adj = np.zeros((8, 8), dtype=int)
@@ -211,8 +210,8 @@ if __name__ == "__main__":
 
     test_cases = [
         ("Uniform (T[i,j]=4/7)",   uniform_hose(n, d)),
-        ("Ring permutation",        ring_permutation(n, d)),
-        ("Random from T_hose",      random_hose(n, d)),
+        # ("Ring permutation",        ring_permutation(n, d)),
+        # ("Random from T_hose",      random_hose(n, d)),
     ]
 
     results = {}
